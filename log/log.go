@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -34,6 +35,7 @@ var (
 
 // Init 初始化全局 logger
 func Init(cfg *Config) error {
+	// 默认配置
 	if cfg == nil {
 		cfg = &Config{
 			Level:      "info",
@@ -48,117 +50,121 @@ func Init(cfg *Config) error {
 	}
 
 	// 1. 解析日志级别
-	var level slog.Level
-	switch cfg.Level {
-	case "debug":
-		level = slog.LevelDebug
-	case "info":
-		level = slog.LevelInfo
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	default:
-		level = slog.LevelInfo
-	}
+	level := parseLogLevel(cfg.Level)
 
-	// 2. 构建输出 writer（可能多个：文件 + 控制台）
+	// 2. 构建输出 writer
 	var writers []io.Writer
-
 	if cfg.Console {
 		writers = append(writers, os.Stderr)
 	}
 	if cfg.LogPath != "" {
-		// 使用 lumberjack 实现自动切割
 		fileWriter = &lumberjack.Logger{
 			Filename:   cfg.LogPath,
-			MaxSize:    cfg.MaxSize, // MB
+			MaxSize:    cfg.MaxSize,
 			MaxBackups: cfg.MaxBackups,
-			MaxAge:     cfg.MaxAge, // days
+			MaxAge:     cfg.MaxAge,
 			Compress:   cfg.Compress,
 			LocalTime:  true,
 		}
 		writers = append(writers, fileWriter)
 	}
-
-	// 如果没有配置任何输出，默认输出到 stderr
 	if len(writers) == 0 {
 		writers = append(writers, os.Stderr)
 	}
 
 	multiWriter := io.MultiWriter(writers...)
 
-	// 3. 选择格式：JSON 或 Text
-	var handler slog.Handler
+	// 3. 处理器选项
 	opts := &slog.HandlerOptions{
-		AddSource: true, // 显示调用文件和行号
-		Level:     level,
-		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-			// 自定义某些字段名（可选）
-			if a.Key == slog.SourceKey {
-
-				// 只保留文件名和行号，不要完整路径
-				if source, ok := a.Value.Any().(*slog.Source); ok && source != nil {
-					_, file := splitPath(source.File)
-					source.File = file
-					a.Value = slog.AnyValue(source)
-				}
-			}
-			return a
-		},
+		AddSource:   true,
+		Level:       level,
+		ReplaceAttr: replaceSourceAttr,
 	}
 
+	// 4. 创建 handler
+	var handler slog.Handler
 	if cfg.Format == "json" {
 		handler = slog.NewJSONHandler(multiWriter, opts)
 	} else {
 		handler = slog.NewTextHandler(multiWriter, opts)
 	}
 
+	// 5. 设置全局 logger
 	defaultLogger = slog.New(handler)
-	slog.SetDefault(defaultLogger) // 同时覆盖标准库的全局 logger
+	slog.SetDefault(defaultLogger)
 	return nil
 }
 
-// splitPath 分割路径获取文件名部分
-func splitPath(path string) (dir, file string) {
-	for i := len(path) - 1; i >= 0; i-- {
-		if path[i] == '/' {
-			return path[:i], path[i+1:]
-		}
+// parseLogLevel 解析日志级别字符串
+func parseLogLevel(levelStr string) slog.Level {
+	switch levelStr {
+	case "debug":
+		return slog.LevelDebug
+	case "info":
+		return slog.LevelInfo
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
 	}
-	return "", path
 }
 
-// ----- 对外公开 API（直接使用 slog 方法）-----
-// 也可以保留简单函数，内部调用 defaultLogger
+// replaceSourceAttr 只保留文件名，不显示全路径
+func replaceSourceAttr(_ []string, a slog.Attr) slog.Attr {
+	if a.Key != slog.SourceKey {
+		return a
+	}
+
+	source, ok := a.Value.Any().(*slog.Source)
+	if !ok || source == nil {
+		return a
+	}
+
+	// 官方标准方法获取文件名
+	source.File = filepath.Base(source.File)
+	return slog.Any(slog.SourceKey, source)
+}
+
+// ----- 对外公开 API -----
 
 func Debug(msg string, args ...any) {
 	defaultLogger.Debug(msg, args...)
 }
+
 func Info(msg string, args ...any) {
 	defaultLogger.Info(msg, args...)
 }
+
 func Warn(msg string, args ...any) {
 	defaultLogger.Warn(msg, args...)
 }
+
 func Error(msg string, args ...any) {
 	defaultLogger.Error(msg, args...)
 }
+
+// Fatal 打印日志并退出程序 exit(1)
 func Fatal(msg string, args ...any) {
 	defaultLogger.Log(context.Background(), levelFatal, msg, args...)
+	_ = Sync() // 退出前刷盘
 	os.Exit(1)
 }
+
+// Panic 打印日志并触发 panic
 func Panic(msg string, args ...any) {
-	defer panic(msg)
 	defaultLogger.Log(context.Background(), levelPanic, msg, args...)
+	_ = Sync()
+	panic(msg)
 }
 
-// With 返回带有预设属性的子 logger
+// With 携带固定字段的子 logger
 func With(args ...any) *slog.Logger {
 	return defaultLogger.With(args...)
 }
 
-// Sync 刷新缓冲区（对于文件输出很重要）
+// Sync 刷新日志缓冲区（程序退出前必须调用）
 func Sync() error {
 	if fileWriter != nil {
 		return fileWriter.Close()
