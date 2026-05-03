@@ -35,10 +35,10 @@ var (
 )
 
 // Init 初始化全局 logger
-func Init(cfg *Config) error {
+func Init(cfg Config) error {
 	// 默认配置
-	if cfg == nil {
-		cfg = &Config{
+	if cfg.LogPath == "" {
+		cfg = Config{
 			Level:      "info",
 			Format:     "text",
 			LogPath:    "",
