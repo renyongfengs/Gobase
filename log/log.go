@@ -35,7 +35,7 @@ var (
 )
 
 // Init 初始化全局 logger
-func Init(cfg Config) error {
+func Init(cfg Config) {
 	// 默认配置
 	if cfg.LogPath == "" {
 		cfg = Config{
@@ -96,7 +96,6 @@ func Init(cfg Config) error {
 	// 5. 设置全局 logger
 	defaultLogger = slog.New(handler)
 	slog.SetDefault(defaultLogger)
-	return nil
 }
 
 // parseLogLevel 解析日志级别字符串
