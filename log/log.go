@@ -30,6 +30,7 @@ const (
 // 全局 logger 实例
 var (
 	defaultLogger *slog.Logger
+	levelVar      = new(slog.LevelVar)
 	fileWriter    *lumberjack.Logger
 )
 
@@ -74,10 +75,13 @@ func Init(cfg *Config) error {
 
 	multiWriter := io.MultiWriter(writers...)
 
-	// 3. 处理器选项
+	// 3. 设置初始日志级别
+	levelVar.Set(level)
+
+	// 4. 处理器选项
 	opts := &slog.HandlerOptions{
 		AddSource:   true,
-		Level:       level,
+		Level:       levelVar,
 		ReplaceAttr: replaceSourceAttr,
 	}
 
@@ -170,4 +174,14 @@ func Sync() error {
 		return fileWriter.Close()
 	}
 	return nil
+}
+
+// SetLevel 动态修改日志级别
+func SetLevel(level string) {
+	levelVar.Set(parseLogLevel(level))
+}
+
+// GetLevel 获取当前日志级别
+func GetLevel() slog.Level {
+	return levelVar.Level()
 }
