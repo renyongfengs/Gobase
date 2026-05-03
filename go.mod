@@ -1,4 +1,4 @@
-module github.com/renyongfeng/Golang/Gobase
+module github.com/renyongfengs/Gobase
 
 go 1.25.0
 
