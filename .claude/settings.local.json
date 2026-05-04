@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /Users/renyongfeng/github.com/renyongfeng/02-golang/gobase log --oneline --all --diff-filter=D -- '*.go')",
+      "Bash(git -C /Users/renyongfeng/github.com/renyongfeng/02-golang/gobase log --oneline -10)",
+      "Bash(go mod *)",
+      "Bash(go build *)",
+      "Bash(go run *)"
+    ]
+  }
+}

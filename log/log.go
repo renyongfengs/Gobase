@@ -1,186 +1,164 @@
 package log
 
 import (
-	"context"
-	"io"
-	"log/slog"
+	"fmt"
 	"os"
-	"path/filepath"
+	"time"
 
-	"gopkg.in/natefinch/lumberjack.v2"
+	"github.com/natefinch/lumberjack"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // Config 日志配置
 type Config struct {
 	Level      string // debug, info, warn, error
-	Format     string // json, text
+	Format     string // json, console
 	LogPath    string // 日志文件路径，空表示不输出到文件
 	MaxSize    int    // 单个日志文件最大大小（MB），默认100
 	MaxBackups int    // 保留的旧日志文件最大数量，默认7
-	MaxAge     int    // 保留旧日志文件的最大天数，默认30 days
-	Compress   bool   // 是否压缩旧日志，默认false
-	Console    bool   // 是否同时输出到控制台，默认true
+	MaxAge     int    // 保留旧日志文件的最大天数，默认30
 }
 
-const (
-	levelFatal = slog.Level(12)
-	levelPanic = slog.Level(14)
-)
-
-// 全局 logger 实例
 var (
-	defaultLogger *slog.Logger
-	levelVar      = new(slog.LevelVar)
-	fileWriter    *lumberjack.Logger
+	logger    *zap.Logger
+	levelCtrl zap.AtomicLevel
 )
 
 // Init 初始化全局 logger
 func Init(cfg Config) {
-	// 默认配置
+	if cfg.Level == "" {
+		cfg.Level = "info"
+	}
+	if cfg.Format == "" {
+		cfg.Format = "console"
+	}
+	if cfg.MaxSize == 0 {
+		cfg.MaxSize = 100
+	}
+	if cfg.MaxBackups == 0 {
+		cfg.MaxBackups = 7
+	}
+	if cfg.MaxAge == 0 {
+		cfg.MaxAge = 30
+	}
+
+	config := zapcore.EncoderConfig{
+		MessageKey: "msg",
+		LevelKey:   "level",
+		TimeKey:    "ts",
+		CallerKey:  "file",
+		EncodeLevel: func(level zapcore.Level, encoder zapcore.PrimitiveArrayEncoder) {
+			encoder.AppendString(level.CapitalString())
+		},
+		EncodeCaller: func(caller zapcore.EntryCaller, encoder zapcore.PrimitiveArrayEncoder) {
+			encoder.AppendString(caller.TrimmedPath())
+		},
+		EncodeTime: func(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
+			enc.AppendString(t.Format("2006-01-02T15:04:05.000Z"))
+		},
+		EncodeDuration: func(d time.Duration, enc zapcore.PrimitiveArrayEncoder) {
+			enc.AppendInt64(int64(d) / 1000000)
+		},
+	}
+
+	levelCtrl = zap.NewAtomicLevel()
+
+	var writers []zapcore.WriteSyncer
 	if cfg.LogPath == "" {
-		cfg = Config{
-			Level:      "info",
-			Format:     "text",
-			LogPath:    "",
-			MaxSize:    100,
-			MaxBackups: 7,
-			MaxAge:     30,
-			Compress:   false,
-			Console:    true,
-		}
-	}
-
-	// 1. 解析日志级别
-	level := parseLogLevel(cfg.Level)
-
-	// 2. 构建输出 writer
-	var writers []io.Writer
-	if cfg.Console {
-		writers = append(writers, os.Stderr)
-	}
-	if cfg.LogPath != "" {
-		fileWriter = &lumberjack.Logger{
+		writers = append(writers, zapcore.AddSync(os.Stderr))
+	} else {
+		ljWriter := &lumberjack.Logger{
 			Filename:   cfg.LogPath,
 			MaxSize:    cfg.MaxSize,
 			MaxBackups: cfg.MaxBackups,
 			MaxAge:     cfg.MaxAge,
-			Compress:   cfg.Compress,
 			LocalTime:  true,
 		}
-		writers = append(writers, fileWriter)
-	}
-	if len(writers) == 0 {
-		writers = append(writers, os.Stderr)
+		writers = append(writers, zapcore.AddSync(ljWriter))
 	}
 
-	multiWriter := io.MultiWriter(writers...)
+	ws := zapcore.NewMultiWriteSyncer(writers...)
 
-	// 3. 设置初始日志级别
-	levelVar.Set(level)
-
-	// 4. 处理器选项
-	opts := &slog.HandlerOptions{
-		AddSource:   true,
-		Level:       levelVar,
-		ReplaceAttr: replaceSourceAttr,
-	}
-
-	// 4. 创建 handler
-	var handler slog.Handler
+	var core zapcore.Core
 	if cfg.Format == "json" {
-		handler = slog.NewJSONHandler(multiWriter, opts)
+		core = zapcore.NewCore(zapcore.NewJSONEncoder(config), ws, levelCtrl)
 	} else {
-		handler = slog.NewTextHandler(multiWriter, opts)
+		core = zapcore.NewCore(zapcore.NewConsoleEncoder(config), ws, levelCtrl)
 	}
 
-	// 5. 设置全局 logger
-	defaultLogger = slog.New(handler)
-	slog.SetDefault(defaultLogger)
-}
+	logger = zap.New(core, zap.AddCaller(), zap.AddStacktrace(zap.WarnLevel), zap.AddCallerSkip(1))
 
-// parseLogLevel 解析日志级别字符串
-func parseLogLevel(levelStr string) slog.Level {
-	switch levelStr {
-	case "debug":
-		return slog.LevelDebug
-	case "info":
-		return slog.LevelInfo
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
-}
-
-// replaceSourceAttr 只保留文件名，不显示全路径
-func replaceSourceAttr(_ []string, a slog.Attr) slog.Attr {
-	if a.Key != slog.SourceKey {
-		return a
-	}
-
-	source, ok := a.Value.Any().(*slog.Source)
-	if !ok || source == nil {
-		return a
-	}
-
-	// 官方标准方法获取文件名
-	source.File = filepath.Base(source.File)
-	return slog.Any(slog.SourceKey, source)
-}
-
-// ----- 对外公开 API -----
-
-func Debug(msg string, args ...any) {
-	defaultLogger.Debug(msg, args...)
-}
-
-func Info(msg string, args ...any) {
-	defaultLogger.Info(msg, args...)
-}
-
-func Warn(msg string, args ...any) {
-	defaultLogger.Warn(msg, args...)
-}
-
-func Error(msg string, args ...any) {
-	defaultLogger.Error(msg, args...)
-}
-
-// Fatal 打印日志并退出程序 exit(1)
-func Fatal(msg string, args ...any) {
-	defaultLogger.Log(context.Background(), levelFatal, msg, args...)
-	_ = Sync() // 退出前刷盘
-	os.Exit(1)
-}
-
-// Panic 打印日志并触发 panic
-func Panic(msg string, args ...any) {
-	defaultLogger.Log(context.Background(), levelPanic, msg, args...)
-	_ = Sync()
-	panic(msg)
-}
-
-// With 携带固定字段的子 logger
-func With(args ...any) *slog.Logger {
-	return defaultLogger.With(args...)
-}
-
-// Sync 刷新日志缓冲区（程序退出前必须调用）
-func Sync() error {
-	if fileWriter != nil {
-		return fileWriter.Close()
-	}
-	return nil
+	SetLevel(cfg.Level)
 }
 
 // SetLevel 动态修改日志级别
 func SetLevel(level string) {
-	levelVar.Set(parseLogLevel(level))
+	levelCtrl.SetLevel(ParseLevel(level))
 }
 
 // GetLevel 获取当前日志级别
-func GetLevel() slog.Level {
-	return levelVar.Level()
+func GetLevel() zapcore.Level {
+	return levelCtrl.Level()
+}
+
+// ParseLevel 解析日志级别字符串
+func ParseLevel(level string) zapcore.Level {
+	switch level {
+	case "debug":
+		return zap.DebugLevel
+	case "info":
+		return zap.InfoLevel
+	case "warn":
+		return zap.WarnLevel
+	case "error":
+		return zap.ErrorLevel
+	default:
+		return zap.InfoLevel
+	}
+}
+
+// GetLogInst 获取底层 zap.Logger 实例
+func GetLogInst() *zap.Logger {
+	return logger
+}
+
+// Sync 刷新日志缓冲区
+func Sync() error {
+	return logger.Sync()
+}
+
+// ----- 对外公开 API -----
+
+func Debug(format string, v ...any) {
+	logger.Sugar().Debugf(format, v...)
+}
+
+func Info(format string, v ...any) {
+	logger.Sugar().Infof(format, v...)
+}
+
+func Warn(format string, v ...any) {
+	logger.Sugar().Warnf(format, v...)
+}
+
+func Error(format string, v ...any) {
+	logger.Sugar().Errorf(format, v...)
+}
+
+func Fatal(format string, v ...any) {
+	logger.Sugar().Errorf(format, v...)
+	_ = logger.Sync()
+	os.Exit(1)
+}
+
+func Panic(format string, v ...any) {
+	s := fmt.Sprintf(format, v...)
+	logger.Sugar().Errorf(s)
+	_ = logger.Sync()
+	panic(s)
+}
+
+func With(args ...any) *zap.SugaredLogger {
+	return logger.Sugar().With(args...)
 }
